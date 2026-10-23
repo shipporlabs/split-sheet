@@ -3,7 +3,7 @@ import 'package:flutter/foundation.dart';
 class AppConfig {
   /// Where the web build is hosted. Used in QR codes and PDFs printed from the mobile app.
   /// Change this to your deployed URL (for example a Firebase Hosting or Vercel address).
-  static const publicBaseUrl = 'https://splitsheet.example';
+  static const publicBaseUrl = 'https://usesplitsheet.web.app';
 
   static String get baseUrl {
     if (!kIsWeb) return publicBaseUrl;
