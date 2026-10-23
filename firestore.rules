@@ -1,0 +1,119 @@
+rules_version = '2';
+
+// Split Sheet security rules (Firebase Spark / free plan: no Cloud Functions, so the rules
+// enforce the important invariants themselves).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isUser(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    // Profiles and signing keys: only the owner.
+    match /users/{uid} {
+      allow read, write: if isUser(uid);
+
+      match /private/{doc} {
+        allow read, write: if isUser(uid);
+      }
+    }
+
+    // Invite code -> sheet ID. Readable one code at a time by anyone signed in; never listable.
+    match /invites/{code} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn()
+        && request.resource.data.creatorUid == request.auth.uid
+        && request.resource.data.sheetId is string
+        && request.resource.data.keys().hasOnly(['sheetId', 'creatorUid', 'createdAt']);
+      allow update, delete: if signedIn() && resource.data.creatorUid == request.auth.uid;
+    }
+
+    match /sheets/{sheetId} {
+      function isMember() {
+        return signedIn() && request.auth.uid in resource.data.memberUids;
+      }
+
+      // The signed terms, their hash and who created the sheet can never change.
+      function coreUnchanged() {
+        return request.resource.data.terms == resource.data.terms
+          && request.resource.data.docHash == resource.data.docHash
+          && request.resource.data.creatorUid == resource.data.creatorUid
+          && request.resource.data.creatorAddress == resource.data.creatorAddress
+          && request.resource.data.inviteCode == resource.data.inviteCode;
+      }
+
+      function keepsMembers() {
+        return request.resource.data.memberUids.hasAll(resource.data.memberUids);
+      }
+
+      // Someone who is not yet a member may only add themselves to an open sheet.
+      function joiningOpenSheet() {
+        return resource.data.status == 'pending'
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['memberUids', 'claims', 'wallets', 'updatedAt'])
+          && request.resource.data.memberUids.size() == resource.data.memberUids.size() + 1
+          && request.auth.uid in request.resource.data.memberUids;
+      }
+
+      // Members see their sheets. While a sheet is open, anyone signed in who has its ID
+      // (from an invite code) can read it so they can pick their name and join.
+      allow get: if signedIn()
+        && (request.auth.uid in resource.data.memberUids || resource.data.status == 'pending');
+      allow list: if signedIn() && request.auth.uid in resource.data.memberUids;
+
+      allow create: if signedIn()
+        && request.resource.data.creatorUid == request.auth.uid
+        && request.resource.data.memberUids == [request.auth.uid]
+        && request.resource.data.status == 'pending'
+        && request.resource.data.terms.sheetId == sheetId
+        && request.resource.data.signatures.size() == 0;
+
+      allow update: if signedIn()
+        && coreUnchanged()
+        && keepsMembers()
+        && (isMember() || joiningOpenSheet())
+        && request.resource.data.status in ['pending', 'executed', 'superseded', 'cancelled']
+        && request.resource.data.signatures.size() >= resource.data.signatures.size();
+
+      allow delete: if false;
+    }
+
+    // Public, append-only record of hashes, shares and signature times (the testnet stand-in).
+    match /ledger/{sheetId} {
+      allow read: if true;
+
+      allow create: if signedIn()
+        && request.resource.data.sheetId == sheetId
+        && request.resource.data.status == 'pending'
+        && request.resource.data.signatures.size() == 0;
+
+      allow update: if signedIn()
+        && resource.data.status in ['pending', 'executed']
+        && request.resource.data.sheetId == resource.data.sheetId
+        && request.resource.data.docHash == resource.data.docHash
+        && request.resource.data.audioHash == resource.data.audioHash
+        && request.resource.data.previousId == resource.data.previousId
+        && request.resource.data.partyCount == resource.data.partyCount
+        && request.resource.data.compositionBps == resource.data.compositionBps
+        && request.resource.data.masterBps == resource.data.masterBps
+        && request.resource.data.signatures.size() >= resource.data.signatures.size()
+        && request.resource.data.events.size() > resource.data.events.size();
+
+      allow delete: if false;
+    }
+
+    // Royalty payments, visible to the people on the sheet. Only into fully signed sheets.
+    match /payouts/{payoutId} {
+      allow read: if signedIn() && request.auth.uid in resource.data.memberUids;
+      allow create: if signedIn()
+        && request.auth.uid in request.resource.data.memberUids
+        && get(/databases/$(database)/documents/sheets/$(request.resource.data.sheetId)).data.status == 'executed';
+      allow update, delete: if false;
+    }
+  }
+}
